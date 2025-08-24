@@ -1,2 +1,2 @@
 # Cross_domain
-chuanshi
+chuangshi
