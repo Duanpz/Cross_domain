@@ -1,0 +1,1 @@
+C:\rustProject\Cross_domain\target\debug\client.exe: C:\rustProject\Cross_domain\sdk\../proto C:\rustProject\Cross_domain\sdk\../proto/chuangshi.proto C:\rustProject\Cross_domain\sdk\build.rs C:\rustProject\Cross_domain\sdk\src\bin\client.rs C:\rustProject\Cross_domain\sdk\src\lib.rs C:\rustProject\Cross_domain\target\debug\build\sdk-e3de0290ec0dae26\out\chuangshi.rs

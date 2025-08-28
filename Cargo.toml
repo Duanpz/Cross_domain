@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = [
+    "gmm",
+    "rmn",
+    "dn",
+    "sdk"
+, "cli"]
+
+[profile.release]
+opt-level = 'z'
+lto = true
+codegen-units = 1
+panic = 'abort'

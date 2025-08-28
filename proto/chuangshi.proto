@@ -1,0 +1,125 @@
+syntax = "proto3";
+
+package chuangshi;
+
+// 元数据服务定义
+service MetadataService {
+    // 创建文件
+    rpc CreateFile(CreateRequest) returns (CreateResponse);
+    
+    // 读取文件
+    rpc ReadFile(ReadRequest) returns (ReadResponse);
+    
+    // 删除文件
+    rpc DeleteFile(DeleteRequest) returns (DeleteResponse);
+    
+    // 列出目录
+    rpc ListDirectory(ListRequest) returns (ListResponse);
+    
+    // 获取文件属性
+    rpc GetFileAttributes(GetAttributesRequest) returns (GetAttributesResponse);
+    
+    // 更新文件元数据
+    rpc UpdateFileMetadata(UpdateMetadataRequest) returns (UpdateMetadataResponse);
+}
+
+// 创建文件请求
+message CreateRequest {
+    string path = 1;
+    bytes data = 2;
+    map<string, string> metadata = 3;  // 文件元数据
+    string node_id = 4;                // 存储节点ID
+    repeated string replicas = 5;      // 副本节点列表
+    int32 replication_factor = 6;      // 复制因子
+}
+
+// 创建文件响应
+message CreateResponse {
+    bool success = 1;
+    string file_id = 2;                // 文件唯一标识符
+    string message = 3;                // 状态消息
+}
+
+// 读取文件请求
+message ReadRequest {
+    string path = 1;
+    int64 offset = 2;                  // 读取偏移量
+    int32 length = 3;                  // 读取长度
+}
+
+// 读取文件响应
+message ReadResponse {
+    bytes data = 1;
+    int64 size = 2;                    // 文件大小
+    string file_id = 3;                // 文件唯一标识符
+}
+
+// 删除文件请求
+message DeleteRequest {
+    string path = 1;
+    bool force = 2;                    // 是否强制删除
+}
+
+// 删除文件响应
+message DeleteResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// 列出目录请求
+message ListRequest {
+    string path = 1;                   // 目录路径
+    bool recursive = 2;                // 是否递归列出
+}
+
+// 列出目录响应
+message ListResponse {
+    repeated FileInfo files = 1;       // 文件信息列表
+    repeated DirectoryInfo directories = 2; // 目录信息列表
+}
+
+// 文件信息
+message FileInfo {
+    string path = 1;
+    int64 size = 2;
+    int64 created_at = 3;
+    int64 modified_at = 4;
+    string file_id = 5;
+    string node_id = 6;
+    repeated string replicas = 7;
+    map<string, string> metadata = 8;
+    string checksum = 9;               // 文件校验和
+}
+
+// 目录信息
+message DirectoryInfo {
+    string path = 1;
+    int64 created_at = 2;
+    int64 modified_at = 3;
+    int64 file_count = 4;
+    int64 total_size = 5;
+}
+
+// 获取文件属性请求
+message GetAttributesRequest {
+    string path = 1;
+}
+
+// 获取文件属性响应
+message GetAttributesResponse {
+    FileInfo file_info = 1;
+    bool exists = 2;
+}
+
+// 更新文件元数据请求
+message UpdateMetadataRequest {
+    string path = 1;
+    map<string, string> metadata = 2;  // 新的元数据
+    string node_id = 3;                // 更新节点ID
+}
+
+// 更新文件元数据响应
+message UpdateMetadataResponse {
+    bool success = 1;
+    string message = 2;
+}
