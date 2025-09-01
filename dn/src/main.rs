@@ -1,72 +1,140 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-
 use tokio::net::TcpListener;
 use tonic::{transport::Server, Request, Response, Status};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use std::time::SystemTime;
+use std::path::Path;
+use std::fs;
+use tokio::fs as async_fs;
 
-mod pb {
-    include!(concat!(env!("OUT_DIR"), "/chuangshi.rs"));
+mod erasure_coding;
+mod proto {
+    tonic::include_proto!("chuangshi");
 }
-use pb::{MetadataServiceServer, CreateRequest, CreateResponse, ReadRequest, ReadResponse};
 
-mod storage;
-use storage::StorageManager;
 
-#[derive(Debug)]
-struct MetadataService {
-    storage_manager: Arc<StorageManager>,
+
+use erasure_coding::ErasureCoder;
+use proto::{ data_node_service_server::DataNodeServiceServer, StoreRequest, RetrieveRequest,StoreResponse,RetrieveResponse,ReadResponse,DeleteResponse,ListResponse};
+
+pub struct DataNode {
+    data_dir: String,
+    erasure_coder: ErasureCoder,
+    chunks: Arc<Mutex<HashMap<String, String>>>, // chunk_id -> shard_paths
+}
+
+impl DataNode {
+    pub fn new(data_dir: String) -> Self {
+        let coder = ErasureCoder::new(4, 2); // 4数据块 + 2校验块
+        Self {
+            data_dir,
+            erasure_coder: coder,
+            chunks: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn store_chunk(&self, chunk_id: &str, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        log::info!("Storing chunk: {}", chunk_id);
+        
+        // 使用纠删码编码
+        let shards = self.erasure_coder.encode(data);
+        
+        // 存储每个shard到本地文件系统
+        let mut shard_paths = Vec::new();
+        for (i, shard) in shards.iter().enumerate() {
+            let shard_path = format!("{}/{}_shard_{}", self.data_dir, chunk_id, i);
+            async_fs::write(&shard_path, shard).await?;
+            shard_paths.push(shard_path);
+        }
+        
+        // 记录元数据
+        let mut chunks = self.chunks.lock().await;
+        chunks.insert(chunk_id.to_string(), shard_paths.join(","));
+        
+        log::info!("Successfully stored chunk: {}", chunk_id);
+        Ok(())
+    }
+
+    async fn retrieve_chunk(&self, chunk_id: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        log::info!("Retrieving chunk: {}", chunk_id);
+        
+        // 读取所有shard
+        let mut shards = Vec::new();
+        let mut available_indices = Vec::new();
+        
+        for i in 0..self.erasure_coder.total_shards() {
+            let shard_path = format!("{}/{}_shard_{}", self.data_dir, chunk_id, i);
+            if Path::new(&shard_path).exists() {
+                let shard_data = async_fs::read(&shard_path).await?;
+                shards.push(shard_data);
+                available_indices.push(i);
+            } else {
+                shards.push(vec![]); // 空shard占位
+            }
+        }
+        
+        // 解码恢复数据
+        // let data = self.erasure_coder.decode(&shards, &available_indices);
+        let data = self.erasure_coder.decode(shards.clone(), &available_indices);
+        log::info!("Successfully retrieved chunk: {}", chunk_id);
+        Ok(data)
+
+
+
+    }
 }
 
 #[tonic::async_trait]
-impl MetadataServiceServer for MetadataService {
-    async fn create_file(&self, request: Request<CreateRequest>) -> Result<Response<CreateResponse>, Status> {
-        let req = request.get_ref();
-        println!("DN received create request for {:?}", req.path);
-        
-        // 存储文件数据
-        if let Err(e) = self.storage_manager.write_file(&req.path, &req.data) {
-            eprintln!("Failed to write file: {}", e);
-            return Err(Status::internal("Failed to store file"));
+impl proto::data_node_service_server::DataNodeService for DataNode {
+    async fn store_chunk(
+        &self,
+        request: Request<StoreRequest>,
+    ) -> Result<Response<StoreResponse>, Status> {
+        let req = request.into_inner();
+        match self.store_chunk(&req.chunk_id, &req.data).await {
+            Ok(_) => Ok(Response::new(StoreResponse {
+                success: true,
+                error: String::new(),
+            })),
+            Err(e) => Err(Status::internal(e.to_string())),
         }
-        
-        Ok(Response::new(CreateResponse { success: true }))
     }
 
-    async fn read_file(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
-        let req = request.get_ref();
-        println!("DN received read request for {:?}", req.path);
-
-        // 读取文件数据
-        match self.storage_manager.read_file(&req.path) {
-            Ok(data) => Ok(Response::new(ReadResponse { data })),
-            Err(e) => {
-                eprintln!("Failed to read file: {}", e);
-                Err(Status::not_found("File not found"))
-            }
+    async fn retrieve_chunk(
+        &self,
+        request: Request<RetrieveRequest>,
+    ) -> Result<Response<RetrieveResponse>, Status> {
+        let req = request.into_inner();
+        match self.retrieve_chunk(&req.chunk_id).await {
+            Ok(data) => Ok(Response::new(RetrieveResponse {
+                data,
+                error: String::new(),
+            })),
+            Err(e) => Err(Status::internal(e.to_string())),
         }
     }
 }
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
+    log::info!("Starting Data Node...");
     
-    // 初始化存储管理器
-    let storage_manager = Arc::new(StorageManager::new("./run/dn/data"));
+    let addr = "127.0.0.1:50053".parse()?;
+    let data_node = DataNode::new("./run/dn/data".to_string());
     
-    // 启动 gRPC 服务
-    let addr = SocketAddr::from(([127, 0, 0, 1], 50053));
-    let service = MetadataService {
-        storage_manager,
-    };
+    // 创建数据目录
+    async_fs::create_dir_all("./run/dn/data").await?;
+    
     let server = Server::builder()
-        .add_service(MetadataServiceServer::new(service))
+        .add_service(DataNodeServiceServer::new(data_node))
         .serve(addr);
-
-    println!("DN listening on http://{}", addr);
-
+    
+    log::info!("Data Node listening on {}", addr);
+    
     server.await?;
+    
     Ok(())
 }

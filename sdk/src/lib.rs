@@ -1,110 +1,82 @@
-use tonic::transport::Channel;
-use std::collections::HashMap;
-
-// 重新导入生成的 protobuf 类型
-mod pb {
-    include!(concat!(env!("OUT_DIR"), "/chuangshi.rs"));
+pub mod proto {
+    tonic::include_proto!("chuangshi"); // 与 proto 文件中的 package 名一致
 }
 
-use pb::{MetadataServiceClient, CreateRequest, CreateResponse, ReadRequest, ReadResponse, DeleteRequest, DeleteResponse, ListRequest, ListResponse, GetAttributesRequest, GetAttributesResponse, UpdateMetadataRequest, UpdateMetadataResponse};
 
-/// 创世 NDFS 客户端
+use tonic::{transport::Channel, Request};
+use proto::metadata_service_client::MetadataServiceClient;
+use proto::data_node_service_client::DataNodeServiceClient;
+
+
+
+
+
+
+use proto::{metadata_service_server::MetadataServiceServer, CreateRequest, ReadRequest, DeleteRequest, ListRequest};
+
+
+#[derive(Clone)]
 pub struct ChuanShiClient {
-    client: MetadataServiceClient<Channel>,
+    metadata_client: MetadataServiceClient<Channel>,
+    data_client: DataNodeServiceClient<Channel>,
 }
 
 impl ChuanShiClient {
-    /// 创建新的客户端实例
     pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let channel = Channel::from_static("http://127.0.0.1:50051").connect().await?;
-        let client = MetadataServiceClient::new(channel);
-        Ok(ChuanShiClient { client })
+        let metadata_client = MetadataServiceClient::connect("http://127.0.0.1:50051").await?;
+        let data_client = DataNodeServiceClient::connect("http://127.0.0.1:50053").await?;
+        Ok(ChuanShiClient { metadata_client, data_client })
     }
 
-    /// 创建文件
-    pub async fn create_file(&mut self, path: &str, data: Vec<u8>) -> Result<bool, Box<dyn std::error::Error>> {
-        let req = CreateRequest {
+    pub async fn create_file(&mut self, path: &str, size: u64, owner: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        log::info!("Creating file via SDK: {}", path);
+        let req = proto::CreateRequest {
             path: path.to_string(),
-            data,
-            metadata: HashMap::new(),
-            node_id: "".to_string(),
-            replicas: vec![],
-            replication_factor: 0,
+            size,
+            owner: owner.to_string(),
         };
-        let resp = self.client.create_file(req).await?.into_inner();
-        Ok(resp.success)
+        let res = self.metadata_client.create_file(Request::new(req)).await?;
+        let response = res.into_inner();
+        log::info!("Create file result: success={}", response.success);
+        Ok(response.success)
     }
 
-    /// 读取文件
     pub async fn read_file(&mut self, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let req = ReadRequest {
-            path: path.to_string(),
-            offset: 0,
-            length: 0,
-        };
-        let resp = self.client.read_file(req).await?.into_inner();
-        Ok(resp.data)
-    }
-
-    /// 删除文件
-    pub async fn delete_file(&mut self, path: &str, force: bool) -> Result<bool, Box<dyn std::error::Error>> {
-        let req = DeleteRequest {
-            path: path.to_string(),
-            force,
-        };
-        let resp = self.client.delete_file(req).await?.into_inner();
-        Ok(resp.success)
-    }
-
-    /// 列出目录
-    pub async fn list_directory(&mut self, path: &str, recursive: bool) -> Result<ListResponse, Box<dyn std::error::Error>> {
-        let req = ListRequest {
-            path: path.to_string(),
-            recursive,
-        };
-        let resp = self.client.list_directory(req).await?.into_inner();
-        Ok(resp)
-    }
-
-    /// 获取文件属性
-    pub async fn get_file_attributes(&mut self, path: &str) -> Result<GetAttributesResponse, Box<dyn std::error::Error>> {
-        let req = GetAttributesRequest {
+        log::info!("Reading file via SDK: {}", path);
+        let req = proto::ReadRequest {
             path: path.to_string(),
         };
-        let resp = self.client.get_file_attributes(req).await?.into_inner();
-        Ok(resp)
-    }
-
-    /// 更新文件元数据
-    pub async fn update_file_metadata(&mut self, path: &str, metadata: HashMap<String, String>) -> Result<bool, Box<dyn std::error::Error>> {
-        let req = UpdateMetadataRequest {
-            path: path.to_string(),
-            metadata,
-            node_id: "".to_string(),
-        };
-        let resp = self.client.update_file_metadata(req).await?.into_inner();
-        Ok(resp.success)
-    }
-
-    /// 检查文件是否存在
-    pub async fn file_exists(&mut self, path: &str) -> Result<bool, Box<dyn std::error::Error>> {
-        let req = GetAttributesRequest {
-            path: path.to_string(),
-        };
-        let resp = self.client.get_file_attributes(req).await?.into_inner();
-        Ok(resp.exists)
-    }
-
-    /// 获取文件大小
-    pub async fn get_file_size(&mut self, path: &str) -> Result<i64, Box<dyn std::error::Error>> {
-        let req = GetAttributesRequest {
-            path: path.to_string(),
-        };
-        let resp = self.client.get_file_attributes(req).await?.into_inner();
-        if let Some(file_info) = resp.file_info {
-            Ok(file_info.size)
-        } else {
-            Err("File not found".into())
+        let res = self.metadata_client.read_file(Request::new(req)).await?;
+        let response = res.into_inner();
+        if !response.error.is_empty() {
+            return Err(response.error.into());
         }
+        log::info!("Read file result: {} bytes", response.content.len());
+        Ok(response.content)
+    }
+
+    pub async fn delete_file(&mut self, path: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        log::info!("Deleting file via SDK: {}", path);
+        let req = proto::DeleteRequest {
+            path: path.to_string(),
+        };
+        let res = self.metadata_client.delete_file(Request::new(req)).await?;
+        let response = res.into_inner();
+        log::info!("Delete file result: success={}", response.success);
+        Ok(response.success)
+    }
+
+    pub async fn list_files(&mut self, path: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        log::info!("Listing files via SDK: {}", path);
+        let req = proto::ListRequest {
+            dir: path.to_string(),
+        };
+        let res = self.metadata_client.list_files(Request::new(req)).await?;
+        let response = res.into_inner();
+        if !response.error.is_empty() {
+            return Err(response.error.into());
+        }
+        log::info!("List files result: {} files", response.files.len());
+        Ok(response.files)
     }
 }

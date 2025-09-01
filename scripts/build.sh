@@ -1,8 +1,8 @@
 #!/bin/bash
-
-cd "$(dirname "$0")/.."
-
+set -e
 echo "Building project..."
-cargo build --workspace --release
 
-echo "Build completed!"
+cargo clean
+cargo build --workspace
+
+echo "Build completed successfully!"

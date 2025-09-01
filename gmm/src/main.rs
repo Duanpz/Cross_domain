@@ -1,138 +1,214 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::net::TcpListener;
 use tonic::{transport::Server, Request, Response, Status};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use std::time::SystemTime;
+use std::path::Path;
 
-mod pb {
-    include!(concat!(env!("OUT_DIR"), "/chuangshi.rs"));
+pub mod proto {
+    tonic::include_proto!("chuangshi"); // 与 proto 文件中的 package 名一致
 }
-use pb::{MetadataServiceServer, CreateRequest, CreateResponse, ReadRequest, ReadResponse, DeleteRequest, DeleteResponse, ListRequest, ListResponse, GetAttributesRequest, GetAttributesResponse, UpdateMetadataRequest, UpdateMetadataResponse};
 
-mod metadata;
-use metadata::{MetadataManager, FileMeta};
+use proto::{metadata_service_server::MetadataServiceServer, CreateRequest, ReadRequest, DeleteRequest, ListRequest,CreateResponse,ReadResponse,DeleteResponse,ListResponse};
 
-#[derive(Debug)]
-struct MetadataService {
-    metadata_manager: Arc<MetadataManager>,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MetadataEntry {
+    pub path: String,
+    pub size: u64,
+    pub owner: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MetadataChange {
+    pub path: String,
+    pub action: MetadataAction,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum MetadataAction {
+    Create { size: u64, owner: String },
+    Update { size: u64 },
+    Delete,
+}
+
+pub struct GlobalMetadataMaster {
+    metadata: Arc<Mutex<HashMap<String, MetadataEntry>>>,
+    data_dir: String,
+}
+
+impl GlobalMetadataMaster {
+    pub fn new(data_dir: String) -> Self {
+        Self {
+            metadata: Arc::new(Mutex::new(HashMap::new())),
+            data_dir,
+        }
+    }
+
+    async fn create_file_internal(&self, path: &str, size: u64, owner: &str) -> Result<(), Box<dyn std::error::Error>> {
+        log::info!("Creating file: {} with size: {}", path, size);
+        
+        let entry = MetadataEntry {
+            path: path.to_string(),
+            size,
+            owner: owner.to_string(),
+            created_at: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            updated_at: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+
+        let mut metadata = self.metadata.lock().await;
+        metadata.insert(path.to_string(), entry);
+        
+        log::info!("Successfully created file: {}", path);
+        Ok(())
+    }
+
+    async fn read_file_internal(&self, path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        log::info!("Reading file: {}", path);
+        
+        // 在实际实现中，这里应该从DN读取数据
+        // 为了演示，返回空数据
+        let data = vec![];
+        log::info!("Successfully read file: {}", path);
+        Ok(data)
+    }
+
+    async fn delete_file_internal(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        log::info!("Deleting file: {}", path);
+        
+        let mut metadata = self.metadata.lock().await;
+        if metadata.remove(path).is_some() {
+            log::info!("Successfully deleted file: {}", path);
+            Ok(())
+        } else {
+            log::warn!("File not found for deletion: {}", path);
+            Err("File not found".into())
+        }
+    }
 }
 
 #[tonic::async_trait]
-impl MetadataServiceServer for MetadataService {
-    async fn create_file(&self, request: Request<CreateRequest>) -> Result<Response<CreateResponse>, Status> {
-        let req = request.get_ref();
-        println!("GMM received create request for {:?}", req.path);
-
-        let meta = FileMeta {
-            path: req.path.clone(),
-            size: req.data.len() as u64,
-            chunks: vec![],
-            created_at: 0,
-            updated_at: 0,
-            node_id: req.node_id.clone(),
-            replicas: req.replicas.clone(),
-        };
-
-        let success = self.metadata_manager.create_file(&req.path, meta);
+impl proto::metadata_service_server::MetadataService for GlobalMetadataMaster {
+    async fn create_file(
+        &self,
+        request: Request<CreateRequest>,
+    ) -> Result<Response<CreateResponse>, Status> {
+        let req = request.into_inner();
         
-        Ok(Response::new(CreateResponse { success }))
-    }
-
-    async fn read_file(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
-        let req = request.get_ref();
-        println!("GMM received read request for {:?}", req.path);
-
-        // 获取文件元数据
-        let meta = self.metadata_manager.get_file(&req.path);
-        if meta.is_none() {
-            return Err(Status::not_found("File not found"));
-        }
-
-        // 这里可以返回实际数据（暂时返回空）
-        Ok(Response::new(ReadResponse { data: vec![] }))
-    }
-
-    async fn delete_file(&self, request: Request<DeleteRequest>) -> Result<Response<DeleteResponse>, Status> {
-        let req = request.get_ref();
-        println!("GMM received delete request for {:?}", req.path);
-
-        let success = self.metadata_manager.delete_file(&req.path);
-        
-        Ok(Response::new(DeleteResponse { success, message: "File deleted".to_string() }))
-    }
-
-    async fn list_directory(&self, request: Request<ListRequest>) -> Result<Response<ListResponse>, Status> {
-        let req = request.get_ref();
-        println!("GMM received list request for {:?}", req.path);
-
-        // 简单的目录列表实现
-        let files = vec![];
-        let directories = vec![];
-        
-        Ok(Response::new(ListResponse { 
-            files, 
-            directories 
-        }))
-    }
-
-    async fn get_file_attributes(&self, request: Request<GetAttributesRequest>) -> Result<Response<GetAttributesResponse>, Status> {
-        let req = request.get_ref();
-        println!("GMM received get attributes request for {:?}", req.path);
-
-        let meta = self.metadata_manager.get_file(&req.path);
-        if let Some(file_meta) = meta {
-            let file_info = FileInfo {
-                path: file_meta.path,
-                size: file_meta.size,
-                created_at: file_meta.created_at,
-                modified_at: file_meta.updated_at,
-                file_id: "file_id_123".to_string(),
-                node_id: file_meta.node_id,
-                replicas: file_meta.replicas,
-                metadata: req.metadata.clone(), // 这里应该从实际元数据中获取
-                checksum: "checksum_123".to_string(),
-            };
-            Ok(Response::new(GetAttributesResponse { 
-                file_info: Some(file_info), 
-                exists: true 
-            }))
-        } else {
-            Ok(Response::new(GetAttributesResponse { 
-                file_info: None, 
-                exists: false 
-            }))
+        match self.create_file_internal(&req.path, req.size, &req.owner).await {
+            Ok(_) => {
+                log::info!("Create file success: {}", req.path);
+                Ok(Response::new(CreateResponse {
+                    success: true,
+                    error: String::new(),
+                }))
+            }
+            Err(e) => {
+                log::error!("Create file failed: {} - {}", req.path, e);
+                Ok(Response::new(CreateResponse {
+                    success: false,
+                    error: e.to_string(),
+                }))
+            }
         }
     }
 
-    async fn update_file_metadata(&self, request: Request<UpdateMetadataRequest>) -> Result<Response<UpdateMetadataResponse>, Status> {
-        let req = request.get_ref();
-        println!("GMM received update metadata request for {:?}", req.path);
-
-        // 这里应该更新文件元数据
-        let success = true;
+    async fn read_file(
+        &self,
+        request: Request<ReadRequest>,
+    ) -> Result<Response<ReadResponse>, Status> {
+        let req = request.into_inner();
         
-        Ok(Response::new(UpdateMetadataResponse { 
-            success, 
-            message: "Metadata updated".to_string() 
+        match self.read_file_internal(&req.path).await {
+            Ok(data) => {
+                log::info!("Read file success: {}", req.path);
+                Ok(Response::new(ReadResponse {
+                    content: data,
+                    error: String::new(),
+                }))
+            }
+            Err(e) => {
+                log::error!("Read file failed: {} - {}", req.path, e);
+                Ok(Response::new(ReadResponse {
+                    content: vec![],
+                    error: e.to_string(),
+                }))
+            }
+        }
+    }
+
+    async fn delete_file(
+        &self,
+        request: Request<DeleteRequest>,
+    ) -> Result<Response<DeleteResponse>, Status> {
+        let req = request.into_inner();
+        
+        match self.delete_file_internal(&req.path).await {
+            Ok(_) => {
+                log::info!("Delete file success: {}", req.path);
+                Ok(Response::new(DeleteResponse {
+                    success: true,
+                    error: String::new(),
+                }))
+            }
+            Err(e) => {
+                log::error!("Delete file failed: {} - {}", req.path, e);
+                Ok(Response::new(DeleteResponse {
+                    success: false,
+                    error: e.to_string(),
+                }))
+            }
+        }
+    }
+
+    async fn list_files(
+        &self,
+        request: Request<ListRequest>,
+    ) -> Result<Response<ListResponse>, Status> {
+        let req = request.into_inner();
+        
+        let metadata = self.metadata.lock().await;
+        let files: Vec<String> = metadata
+            .keys()
+            .filter(|&k| k.starts_with(&req.dir))
+            .cloned()
+            .collect();
+        
+        log::info!("List files in {}: {} files found", req.dir, files.len());
+        Ok(Response::new(ListResponse {
+            files,
+            error: String::new(),
         }))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 50051));
+    env_logger::init();
+    log::info!("Starting Global Metadata Master...");
     
-    let metadata_manager = Arc::new(MetadataManager::new("./run/gmm/metadata.json"));
+    let addr = "127.0.0.1:50051".parse()?;
+    let gmm = GlobalMetadataMaster::new("./run/gmm".to_string());
     
-    let service = MetadataService {
-        metadata_manager,
-    };
-
+    // 创建运行目录
+    std::fs::create_dir_all("./run/gmm")?;
+    
     let server = Server::builder()
-        .add_service(MetadataServiceServer::new(service))
+        .add_service(MetadataServiceServer::new(gmm))
         .serve(addr);
-
-    println!("GMM listening on http://{}", addr);
-
+    
+    log::info!("Global Metadata Master listening on {}", addr);
+    
     server.await?;
+    
     Ok(())
 }
